@@ -191,35 +191,42 @@ class BigramLanguageModel(nn.Module):
       idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
     return idx
   
-    
+  
+def train_model(m):
+  # print the number of parameters in the model
+  print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
 
+  # create a PyTorch optimizer
+  optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+
+  for iter in range(max_iters):
+    # once awhile evaluate the loss on train and val sets
+    if iter % eval_interval == 0:
+      losses = estimate_loss()  # estimate loss averages the losses of multiple batches 
+      print(f"Step: {iter} | Train loss: {losses['train']:.4f} | Val loss: {losses['val']:.4f}")
+
+    # sample a batch of data
+    xb, yb = get_batch('train')
+
+    # evaluate the loss
+    logits, loss = m.forward(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+  # generation from the model 
+  context = torch.zeros((1,1), dtype = torch.long, device = device)
+  print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
+
+  # save the model
+  torch.save(m.state_dict(), "model.pth")
+
+
+# loading the model and genearting text
 model = BigramLanguageModel()
 m = model.to(device)  # moves all the calcualtions on the GPU if available
+#train_model(m)
 
-# print the number of parameters in the model
-print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
-
-# create a PyTorch optimizer
-optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
-
-for iter in range(max_iters):
-  # once awhile evaluate the loss on train and val sets
-  if iter % eval_interval == 0:
-    losses = estimate_loss()  # estimate loss averages the losses of multiple batches 
-    print(f"Step: {iter} | Train loss: {losses['train']:.4f} | Val loss: {losses['val']:.4f}")
-
-  # sample a batch of data
-  xb, yb = get_batch('train')
-
-  # evaluate the loss
-  logits, loss = m.forward(xb, yb)
-  optimizer.zero_grad(set_to_none=True)
-  loss.backward()
-  optimizer.step()
-
-# generation from the model 
+m.load_state_dict(torch.load("model.pth"))
 context = torch.zeros((1,1), dtype = torch.long, device = device)
-print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
-
-# save the model
-torch.save(m.state_dict(), "model.pth")
+print(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
