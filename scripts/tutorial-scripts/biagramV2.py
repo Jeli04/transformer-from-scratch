@@ -219,7 +219,7 @@ def train_model(m):
   print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
 
   # save the model
-  torch.save(m.state_dict(), "model2.pth")
+  torch.save(m.state_dict(), "models/model2.pth")
 
 
 # loading the model and genearting text
@@ -227,7 +227,7 @@ model = BigramLanguageModel()
 m = model.to(device)  # moves all the calcualtions on the GPU if available
 train_model(m)
 
-#m.load_state_dict(torch.load("model2.pth"))
+#m.load_state_dict(torch.load("models/model2.pth"))
 #print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
 
 context = torch.zeros((1,1), dtype = torch.long, device = device)
