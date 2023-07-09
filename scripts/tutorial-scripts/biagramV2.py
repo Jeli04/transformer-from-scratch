@@ -72,39 +72,39 @@ def estimate_loss():
   model.train()
   return out
 
-
-class Head(nn.Module):
-    """One head for self attention"""
-    def __init__(self, head_size):
-        super().__init__()
-        self.key = nn.Linear(n_embed, head_size, bias=False)
-        self.query = nn.Linear(n_embed, head_size, bias=False)
-        self.value = nn.Linear(n_embed, head_size, bias=False)
-        # the mask matrix
-        self.register_buffer('tril', torch.tril(torch.ones((block_size, block_size)))) # a buffer is a tensor in a PyTorch module that isn't a model parameter but still used in the module
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        B, T, C = x.shape   
-
-        wei = self.query(x) @ self.key(x).transpose(-2, -1) * C**-0.5  # C is head size 
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # mask out the upper triangle (B, T, T)
-        wei = F.softmax(wei, dim=-1) # normalize
-
-        out = wei @ self.value(x) 
-        return out
-
-
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embed, n_embed)
         self.dropout = nn.Dropout(dropout)
 
+        self.key = nn.Linear(n_embed, n_embed, bias=False)  # 384, 384 changed from n_embed, head_size to n_embed, n_embed
+        self.query = nn.Linear(n_embed, n_embed, bias=False)
+        self.value = nn.Linear(n_embed, n_embed, bias=False)
+
+        # the mask matrix
+        self.register_buffer('tril', torch.tril(torch.ones((block_size, block_size)))) # a buffer is a tensor in a PyTorch module that isn't a model parameter but still used in the module
+
+        self.num_heads = num_heads
+        self.head_size = head_size  # head_size = n_embed // n_head
+
     def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)   # combine the heads 
+        B, T, C = x.shape   
+  
+        k,q,v = self.key(x), self.query(x), self.value(x)
+
+        # have to creaste a 4D tensor with num_heads is the number of batches for parallel processing
+        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)  # (B, num_heads, T, head_size)
+        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)  # (B, num_heads, T, head_size)
+        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)  # (B, num_heads, T, head_size)
+
+        wei = q @ k.transpose(-2, -1) * C**-0.5  # C is head size 
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # mask out the upper triangle (B, T, T)
+        wei = F.softmax(wei, dim=-1) # normalize
+
+        out = wei @ v
+
+        out = out.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side after spliting into batches (97-99)
         out = self.dropout(self.proj(out))  # projection layer back to the residual path
         return out
 
@@ -219,14 +219,17 @@ def train_model(m):
   print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
 
   # save the model
-  torch.save(m.state_dict(), "model.pth")
+  torch.save(m.state_dict(), "model2.pth")
 
 
 # loading the model and genearting text
 model = BigramLanguageModel()
 m = model.to(device)  # moves all the calcualtions on the GPU if available
-#train_model(m)
+train_model(m)
 
-m.load_state_dict(torch.load("model.pth"))
+#m.load_state_dict(torch.load("model2.pth"))
+#print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
+
 context = torch.zeros((1,1), dtype = torch.long, device = device)
-print(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
+print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
+#open('output.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
