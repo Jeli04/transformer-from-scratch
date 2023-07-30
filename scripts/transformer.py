@@ -3,13 +3,15 @@ import torch.nn as nn
 import re
 from torch.nn import functional as F
 
+torch.cuda.empty_cache()  # clears refrences in memory to free up space
+
 batch_size = 64 # number of sequences per batch
 block_size = 256 # number of tokens/characters per sequence
-max_iters = 1
-eval_interval = 1
-learning_rate = 3e-6    # lower learning rate for bigger neural networks
+max_iters = 5000
+eval_interval = 500
+learning_rate = 3e-4    # lower learning rate for bigger neural networks
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 2
+eval_iters = 200
 n_embed = 384
 n_layer = 6
 n_head = 6  # every head is 64 dim (384/6)
@@ -27,7 +29,7 @@ print(f"Name of current CUDA device:{torch.cuda.get_device_name(cuda_id)}")
 torch.manual_seed(1337)
 
 # open the text file as a string
-with open('data/data.txt', 'r', encoding="utf-8") as f:
+with open('data/input.txt', 'r', encoding="utf-8") as f:
   text = f.read()
 
 chars = sorted(list(set(text))) # sets gets one of each value
@@ -44,7 +46,6 @@ data = torch.tensor(encode(text), dtype=torch.long)
 n = int(0.9 * len(data))
 train_data = data[:n]
 val_data = data[n:]
-
 
 # data loading
 def get_batch(split):
@@ -67,6 +68,7 @@ def estimate_loss():
     losses = torch.zeros(eval_iters)
     for k in range(eval_iters):
        X, Y = get_batch(split)
+      #  with torch.amp.autocast(device_type="cuda"):
        logits, loss = model(X, Y)
        losses[k] = loss.item()
     out[split] = losses.mean()
@@ -138,7 +140,6 @@ class Decoder(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size, n_embed) # embedding for token location
         
         head_size = n_embed // n_head   # 32 // 4 = 8
-        self.enc_tokens = Encoder(n_embed, n_head)  # encoder tokens (self attention heads and feed forward network
         self.sa_heads = MultiHeadAttention(n_head, head_size)  # self attention heads (4 heads each with a dim of 8)
         self.ln1 = nn.LayerNorm(n_embed)
         self.ln2 = nn.LayerNorm(n_embed)
@@ -147,7 +148,7 @@ class Decoder(nn.Module):
         self.register_buffer('tril', torch.tril(torch.ones((block_size, block_size)))) # a buffer is a tensor in a PyTorch module that isn't a model parameter but still used in the module
 
 
-    def forward(self, x):
+    def forward(self, x, enc_tokens):
         B, T, C= x.shape
 
         # tok_emb = self.token_embedding_table(x)  # (B, T, C) (Batch, Time, Channels) (4, 8, vocab_size)
@@ -155,7 +156,7 @@ class Decoder(nn.Module):
 
         # # the x + is the residual connection/skip layers
         # x = tok_emb + pos_emb
-        enc_tokens = self.enc_tokens(x) # already performs layer norm
+        # enc_tokens = self.enc_tokens(x) # already performs layer norm
 
         query = x + self.sa_heads(x, x, x, self.tril[:T, :T] == 0)  # send to layer norm than the self attention heads
         query = self.ln1(query)  # layer norm
@@ -195,18 +196,20 @@ class Encoder(nn.Module):
         return enc_tokens
 
 
-class DecoderBlock(nn.Module):
+class TransformerBlock(nn.Module):
     def __init__(self, n_embed, n_head):
         super().__init__()
+        self.encoder = Encoder(n_embed, n_head)
         self.decoder = Decoder(n_embed, n_head)
         self.ffwd = FeedForward(n_embed)
         self.ln1 = nn.LayerNorm(n_embed)
 
     def forward(self, x):
-      x = self.decoder(x)
-      x = x + self.ffwd(self.ln1(x))
+      src = self.encoder(x)
+      target = self.decoder(x, src)
+      target = target + self.ffwd(self.ln1(target))
 
-      return x
+      return target
        
 
 class Transformer(nn.Module):
@@ -214,7 +217,7 @@ class Transformer(nn.Module):
     super().__init__()  # calls the constructor of the parent class (nn.Module)
     self.token_embedding_table = nn.Embedding(vocab_size, n_embed) # paramters are num_embeddings (size of dictionary), embedding_dim (dim of embeddign vec)
     self.position_embedding_table = nn.Embedding(block_size, n_embed) # embedding for token location
-    self.blocks = nn.Sequential(*[DecoderBlock(n_embed, n_head=n_head) for _ in range(n_layer)]) # shortened way for multiple blocks in a sequential model
+    self.blocks = nn.Sequential(*[TransformerBlock(n_embed, n_head=n_head) for _ in range(n_layer)]) # shortened way for multiple blocks in a sequential model
     self.ln_f = nn.LayerNorm(n_embed)    # final layer norm
 
     # final linear layer that decodes the output of the transformer into the vocabulary
@@ -228,11 +231,12 @@ class Transformer(nn.Module):
     tok_emb = self.token_embedding_table(idx)  # (B, T, C) (Batch, Time, Channels) (4, 8, vocab_size)
     pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C) (8, vocab_size) gets the possible next 8 characters
     x = tok_emb + pos_emb  # (B,T,C)  x holds the token identities and their positions
-    # print(tok_emb)
-    x = self.blocks(x)  # (B, T, C) 
-    x = self.ln_f(x)  # (B, T, C)
-    logits = self.lm_head(x)  # (B, T, vocab_size) (4, 8, vocab_size)
+    
+    out = self.blocks(x)  # (B, T, C)
+    out = self.ln_f(out)  # (B, T, C)
+    logits = self.lm_head(out)  # (B, T, vocab_size) (4, 8, vocab_size)
 
+    # does targets refer to target tokens???
     if targets == None:
       loss = None
     else:
@@ -256,19 +260,59 @@ class Transformer(nn.Module):
       logits = logits[: , -1, :]  # becomes (B, C)
       # apply softmax to normalize and get probabilities
       probs = F.softmax(logits, dim=-1) # dim are (B, C)
+      # print(probs)
       # sample from distribution to get a single prediction for what char comes next
       idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
       # append sampled index to the running sequence
       idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
     return idx
+
+
+# schedule learning rate class
+class ScheduleOptimization():
+  def __init__(self, optimizer, lr, model, warmup_steps):
+     self.optimizer = optimizer
+     self.lr = lr
+     self.model = model
+     self.warmup_steps = warmup_steps
+     self.steps = 0
+
+  def step_and_update(self):
+     self.update_learning_rate()
+     self.optimizer.step()
+
+  def zero_grad(self):
+      if self.optimizer == None:
+         print("error")
+      self.optimizer.zero_grad()
+
+  def get_lr_scale(self):
+     model = self.model
+     n_steps, n_warmup = self.steps, self.warmup_steps
+     return (model ** -0.5) * min(n_steps ** -0.5, n_steps * n_warmup ** -1.5)
   
-  
-def train_model(m):
+  def update_learning_rate(self):
+    self.steps += 1
+    lr = self.lr * self.get_lr_scale()
+    
+    # updates the learning rate for each parameter group in the optimizer
+    for param_group in self.optimizer.param_groups:
+      param_group['lr'] = lr
+
+
+def train_model(m, path_to_resume = None):
   # print the number of parameters in the model
   print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
 
   # create a PyTorch optimizer
-  optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate, eps=1e-6)
+  # optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate, eps=1e-6)
+
+  optimizer = torch.optim.Adam(m.parameters(), lr=0.0001, eps=1e-9)
+  if path_to_resume != None:
+    optimizer = optimizer.load_state_dict(torch.load(path_to_resume)['optimizer_state_dict'])
+    schedule = torch.load(path_to_resume)['schedule_state_dict']
+  else:
+    schedule = ScheduleOptimization(optimizer, learning_rate, n_embed, 0.1*max_iters)
 
   for iter in range(max_iters):
     # once awhile evaluate the loss on train and val sets
@@ -281,23 +325,37 @@ def train_model(m):
 
     # evaluate the loss
     logits, loss = m.forward(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
+    schedule.zero_grad()
     loss.backward()
     model.float()
-    optimizer.step()
+    schedule.step_and_update()
 
   # save the model
-  torch.save(m.state_dict(), "models/model3.pth")
-
+  # torch.save(m.state_dict(), "models/model3.pth")
+  torch.save({
+            'epoch': iter,
+            'model_state_dict': m.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'schedule_state_dict': schedule,
+            'loss': loss,
+  }, "models/model3.pth")
 
 # loading the model and genearting text
 model = Transformer()
 m = model.to(device)  # moves all the calcualtions on the GPU if available
-train_model(m)
+# train_model(m)
+ 
+m.load_state_dict(torch.load("models/model3.pth")['model_state_dict'])
+# print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
+print(torch.load("models/model3.pth")['loss'])
 
-#m.load_state_dict(torch.load("models/model2.pth"))
-#print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
+# retrain the model from previous
+train_model(m, "models/model3.pth")
 
-context = torch.zeros((1,1), dtype = torch.long, device = device)
-# print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
-#open('output.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
+input = "Seize on the shame-faced Henry, bear him hence; And once again proclaim us King of England.You are the fount that makes small brooks to flow: Now stops thy spring; my sea sha$l suck them dry, And swell so much the higher by their ebb. "
+context = torch.zeros((1,256), dtype = torch.long, device = device)
+context = torch.tensor(encode(input), dtype=torch.long, device=device)
+context = torch.unsqueeze(torch.cat((torch.zeros(256-len(context), device=device, dtype=torch.long), context)), 0)
+print(decode(m.generate(context, max_new_tokens=100)[0].tolist())[256:])   # we will get random 100 results at first since its not trained yet
+open('output.txt', 'w').write(decode(m.generate(context, max_new_tokens=100)[0].tolist()))
+

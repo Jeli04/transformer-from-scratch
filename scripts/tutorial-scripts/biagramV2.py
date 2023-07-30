@@ -181,6 +181,7 @@ class BigramLanguageModel(nn.Module):
     for _ in range(max_new_tokens):
       # crop the context to the last block_size tokens since the position embedding_table is only block_size
       idx_cond = idx[:, -block_size:]
+      # print(idx_cond)
       # gets the predictions
       logits, loss, = self(idx_cond) # call forward
       # focus only on the last time step
@@ -219,15 +220,22 @@ def train_model(m):
   # save the model
   torch.save(m.state_dict(), "models/model3.pth")
 
+def load_model(filepath):
+  checkpoint = torch.load(filepath)
+  model = BigramLanguageModel()
+  model.load_state_dict(checkpoint)
+  print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
+
+  return model
+
 
 # loading the model and genearting text
-model = BigramLanguageModel()
-m = model.to(device)  # moves all the calcualtions on the GPU if available
+# model = BigramLanguageModel()
+# m = model.to(device)  # moves all the calcualtions on the GPU if available
 # train_model(m)
 
-m.load_state_dict(torch.load("models/model3.pth"))
-print(sum(p.numel() for p in m.parameters())/1e6, "M paramters")
+m = load_model("models/model.pth")
 
 context = torch.zeros((1,1), dtype = torch.long, device = device)
-print(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))   # we will get random 100 results at first since its not trained yet
+print(decode(m.generate(context, max_new_tokens=100)[0].tolist()))   # we will get random 100 results at first since its not trained yet
 #open('output.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
